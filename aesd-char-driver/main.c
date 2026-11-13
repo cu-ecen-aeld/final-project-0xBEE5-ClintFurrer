@@ -370,6 +370,7 @@ static int aesd_setup_cdev(struct aesd_dev *dev)
 
 int aesd_init_module(void)
 {
+    u32 oe_reg;
     dev_t dev = 0;
     int result;
     result = alloc_chrdev_region(&dev, aesd_minor, 1,
@@ -380,6 +381,22 @@ int aesd_init_module(void)
         return result;
     }
     memset(&aesd_device,0,sizeof(struct aesd_dev));
+
+    /**
+     * Initi IO
+     */
+       /* Map the physical hardware address space into kernel virtual memory */
+    gpio2_base = ioremap(GPIO2_START_ADDR, GPIO2_SIZE);
+    if (!gpio2_base) {
+        printk(KERN_WARNING "IO map failed");
+        return -ENOMEM;
+    }
+    oe_reg = ioread32(gpio2_base + GPIO_OE);
+    oe_reg &= ~BUS_MASK;
+    oe_reg &= ~LCD_E;
+    oe_reg &= ~LCD_RS;
+    iowrite32(oe_reg, gpio2_base + GPIO_OE);
+
 
     /**
      * LCD Initi
