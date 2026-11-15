@@ -1,0 +1,1 @@
+make CROSS_COMPILE=/home/nerd/Documents/CU_BoulderSchool/ECEN5713/final_project/Final_Project_Buildroot_dev/buildroot/output/host/bin/arm-linux-
