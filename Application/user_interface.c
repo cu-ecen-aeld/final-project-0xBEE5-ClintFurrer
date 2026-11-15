@@ -214,21 +214,6 @@ int main (void)
             }
         } //for loop
     }//for ever loop
-
-
-
-
-
-
-    ssize_t ret = write(fd, "Hello App", 10);
-
-    if (ret == -1)
-    {
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
 }
 
 void test(void)
