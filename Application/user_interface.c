@@ -85,6 +85,8 @@ static int scan_devices(int *fds, int max)
 int main (void)
 {
     int cmd_idx = 0;
+    char lcd_buff[48];
+    int lcd_len;
 
     cmd_member_t testA;
     testA.name = "hello";
@@ -95,15 +97,15 @@ int main (void)
     gps_dis.handler = gps_show;
 
     cmd_member_t time_dis;
-    time_dis.name = "SHOW CURRENT TIME";
+    time_dis.name = "SHOW CUR TIME";
     time_dis.handler = time_show;
 
     cmd_member_t temper_dis;
-    temper_dis.name = "SHOW TEMPERATURE";
+    temper_dis.name = "SHOW TEMP";
     temper_dis.handler = temperature_show;
 
     cmd_member_t prog_dis;
-    prog_dis.name = "PROGRAM ALARM";
+    prog_dis.name = "PROG ALARM";
     prog_dis.handler = prg_alarm_show;
 
 
@@ -160,9 +162,8 @@ int main (void)
             struct input_event ev;
             ssize_t ret;
             ssize_t ret_lcd;
-            
-            char lcd_buff[48];
-            int lcd_len;
+            //memset(lcd_buff, 0, sizeof(char));
+
             while(1) //loop until all data is read out
             {
                 ret = read(pfds[idx].fd, &ev, sizeof(ev));
@@ -178,18 +179,20 @@ int main (void)
                 switch(ev.code)
                 {
                     case KEY_UP:
+                        memset(lcd_buff, 0, sizeof(char));
                         printf("UP key pressed\n");
                         
                         printf("cmd_idx up:%d\n", cmd_idx);
-                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\r (\x0d)%s", supported_cmds[cmd_idx].name);
+                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
                         printf("%s\n", lcd_buff);
                         ret_lcd = write(fd, lcd_buff, lcd_len);                        
                         cmd_idx = (cmd_idx + 5 - 1) % 5;
                         break;
                     case KEY_DOWN:
+                        memset(lcd_buff, 0, sizeof(char));
                         printf("key down pressed\n");
                         printf("cmd_idx dwn:%d\n", cmd_idx);
-                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\r (\x0d)%s", supported_cmds[cmd_idx].name);
+                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
                         printf("%s\n", lcd_buff);
                         ret_lcd = write(fd, lcd_buff, lcd_len);
                         cmd_idx = (cmd_idx + 5 + 1) % 5;;
@@ -203,6 +206,7 @@ int main (void)
                         break;
                     case KEY_ENTER:
                         printf("enter pressed\n");
+                        cmd_idx = (cmd_idx + 5 - 1) % 5;
                         supported_cmds[cmd_idx].handler();
                         break;
                 }
