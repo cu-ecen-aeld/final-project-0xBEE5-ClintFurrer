@@ -1,3 +1,5 @@
 *.o
 .vscode/
 user_int
+qr_read
+test

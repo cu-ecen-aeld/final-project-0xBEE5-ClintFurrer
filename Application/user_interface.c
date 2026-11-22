@@ -6,11 +6,12 @@
 #include <errno.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <time.h>
+#include <linux/rtc.h>
 
 #include "user_interface.h"
-
-
-//cmd_member_t supported_cmds[8];
 
 void test(void);
 void gps_show(void);
@@ -18,10 +19,9 @@ void time_show(void);
 void temperature_show(void);
 void prg_alarm_show(void);
 void alarms_show(void);
-
-#define MAX_DEVS   8
-#define MAX_EVENT  32
-#define BITS_PER_LONG (sizeof(unsigned long) * 8)
+int keyboard_handler(struct pollfd *pfds, struct input_event *ev);
+int RTC_handler(struct pollfd *pfds, unsigned long *rtc_data);
+int find_next_alarm(time_t now, time_t *new_alarm, alarm_t *alarm_lst);
 
 static int test_bit(int bit, const unsigned long *arr)
 {
@@ -111,10 +111,30 @@ int main (void)
 
     cmd_member_t supported_cmds[MAX_NUM_CMDS] = {testA, gps_dis, time_dis, temper_dis, prog_dis};
 
+    static alarm_t alarms[MAX_ALARMS];   /* zero-initialized: all slots free */
+
+    alarms[0].in_use_FLG = 1;
+    alarms[0].kind = ALARM_ONCE;
+    alarms[0].id = 1;
+    alarms[0].at = 1795315620;
+
+    alarms[1].in_use_FLG = 1;
+    alarms[1].kind = ALARM_ONCE;
+    alarms[1].id = 2;
+    alarms[1].at = 1795316760;
+
     int fd = open("/dev/lcd", O_WRONLY);
     if (fd == -1)
     {
+        printf("LCD not found\n");
+        return -1;
+    }
 
+    int fd_rtc = open("/dev/rtc1", O_NONBLOCK | O_RDONLY);
+    if (fd_rtc == -1)
+    {
+        close(fd);
+        printf("RTC_1 was not found :(\n");
         return -1;
     }
 
@@ -128,11 +148,28 @@ int main (void)
 
     //setup the poll struct
     struct pollfd pfds[MAX_DEVS];
-    for (int i = 0; i < num_dev; i++) 
+    //for (int i = 0; i < num_dev; i++) 
+    //{
+    if (num_dev < 2)
     {
-        pfds[i].fd = fds[i];
-        pfds[i].events = POLLIN;
+        pfds[keyboard_dev].fd = fds[0];
+        pfds[keyboard_dev].events = POLLIN;
     }
+    //}
+
+    pfds[rtc_dev].fd = fd_rtc;
+    pfds[rtc_dev].events = POLLIN;
+
+    num_dev = 2;
+
+    /* Set the alarm 10 s from now (full date/time) */
+    struct rtc_time now;
+    ioctl(fd_rtc, RTC_RD_TIME, &now);
+    struct rtc_wkalrm wk = { .enabled = 1, .time = now };
+    wk.time.tm_sec += 10;                 /* normalize if you cross 60 */
+    if (wk.time.tm_sec >= 60) { wk.time.tm_sec -= 60; wk.time.tm_min++; }
+    ioctl(fd_rtc, RTC_WKALM_SET, &wk);
+    ioctl(fd_rtc, RTC_AIE_ON, 0);
 
     for (;;)
     {
@@ -144,36 +181,60 @@ int main (void)
             }
             return -1;
         }
-        //loop through device/s
-        for(int idx = 0; idx < num_dev; idx++)
-        {
-            if (pfds[idx].revents & (POLLERR | POLLHUP | POLLNVAL)) 
-            {
-            //Unplugged: stop polling this fd (negative fd is ignored)
-            close(pfds[idx].fd);
-            pfds[INPUT_KEYMAP_BY_INDEX].fd = -1; //mark as invalid
-            continue;
-            }
-            if (!(pfds[idx].revents & POLLIN)) //check id fd has data to report
-            {
-                continue; //no data skip device
-            }
+
 
             struct input_event ev;
-            ssize_t ret;
+            unsigned long rtc_data;
             ssize_t ret_lcd;
-            //memset(lcd_buff, 0, sizeof(char));
+
+
+            int rtc_stat = RTC_handler(pfds, &rtc_data);
+            if (rtc_stat == 0)
+            {
+                printf("RTC alarm fired! test pass\n");
+                struct rtc_time rt;
+                ioctl(fd_rtc, RTC_RD_TIME, &rt); //read current time
+                struct tm tmv = {0};
+                tmv.tm_sec = rt.tm_sec;   tmv.tm_min = rt.tm_min;   tmv.tm_hour = rt.tm_hour;
+                tmv.tm_mday = rt.tm_mday; tmv.tm_mon = rt.tm_mon;   tmv.tm_year = rt.tm_year;
+                time_t now = timegm(&tmv);
+                time_t next_alarm;
+                int alarm_stat = find_next_alarm(now, &next_alarm, alarms);
+                if (alarm_stat >= 0)
+                {
+                    struct tm tmv;
+                    struct rtc_wkalrm wk;
+                    gmtime_r(&next_alarm, &tmv);
+                    memset(&wk, 0, sizeof(wk));
+                    wk.enabled = 1;
+                    wk.pending = 0;
+                    wk.time.tm_sec = tmv.tm_sec;
+                    wk.time.tm_min = tmv.tm_min;
+                    wk.time.tm_hour = tmv.tm_hour;
+                    wk.time.tm_mday = tmv.tm_mday;
+                    wk.time.tm_mon  = tmv.tm_mon;
+                    wk.time.tm_year = tmv.tm_year;
+
+                    ioctl(fd_rtc, RTC_WKALM_SET, &wk); //TODO error check
+                    ioctl(fd_rtc, RTC_AIE_ON, 0);
+                }
+                else
+                {
+                    ioctl(fd_rtc, RTC_AIE_OFF, 0);   /* nothing pending: disarm */
+                }
+
+
+                printf("found alarm idx is the earlist %d\n", alarm_stat);
+
+            }
 
             while(1) //loop until all data is read out
             {
-                ret = read(pfds[idx].fd, &ev, sizeof(ev));
-                if (ret != sizeof(ev))
+                int key_stat = keyboard_handler(pfds, &ev);
+                printf("key_stat %d\n", key_stat);
+                if (key_stat != 0)
                 {
-                    break; //did not get full event
-                }
-                if (ev.type != EV_KEY || ev.value == 0)
-                {
-                    continue; //skip if release or non-key event
+                    break;
                 }
 
                 switch(ev.code)
@@ -211,13 +272,129 @@ int main (void)
                         break;
                 }
             }
-            if (ret < 0 && errno == ENODEV)
-            {
-                close(pfds[idx].fd);
-                pfds[idx].fd = -1;
-            }
-        } //for loop
     }//for ever loop
+}
+
+int find_next_alarm(time_t now, time_t *new_alarm, alarm_t *alarm_lst)
+{
+    time_t best = 0;
+    int best_idx = -1;
+    for(int idx = 0; idx < MAX_ALARMS; idx++)
+    {
+        if(alarm_lst[idx].in_use_FLG == 1)
+        {
+            time_t cand = 0;
+            switch (alarm_lst[idx].kind)
+            {
+                case ALARM_ONCE:
+                    cand = alarm_lst[idx].at;
+                break;
+                case ALARM_DAILY:
+                case ALARM_WEEKLY:
+
+                break;
+            }
+            if (cand <= now)
+            {
+                continue; //the alarms is now or passed 
+            }
+            if ((best_idx == -1) || (cand < best))
+            {
+                best_idx = idx; //found an alarm in future
+                best = cand;
+            }
+        }   
+    }
+    if (best_idx != -1)
+    {
+        *new_alarm = best; //value to set the RTC to
+    }
+    return best_idx; 
+}
+
+int keyboard_handler(struct pollfd *pfds, struct input_event *ev)
+{
+    ssize_t ret;
+
+    if (pfds[keyboard_dev].revents & (POLLERR | POLLHUP | POLLNVAL)) 
+    {
+        //Unplugged: stop polling this fd (negative fd is ignored)
+        close(pfds[keyboard_dev].fd);
+        pfds[keyboard_dev].fd = -1; //mark as invalid
+        return 2;
+        //continue;
+    }
+    if (!(pfds[keyboard_dev].revents & POLLIN)) //check id fd has data to report
+    {
+        return 1; //no data skip device
+    }
+
+    while(1) //loop until all data read or error
+    {
+        ret = read(pfds[keyboard_dev].fd, ev, sizeof(*ev)); //read all the data out into ev
+        if (ret == -1)
+        {
+            if (errno == EAGAIN)
+            {
+                return 1; //empty data
+            }
+            if (errno == ENODEV) //dev unplugged
+            {
+                close(pfds[keyboard_dev].fd);
+                pfds[0].fd = -1;
+                return 2;
+            }
+            fprintf(stderr, "kbd error: revents=0x%x fd=%d\n", pfds[keyboard_dev].revents, pfds[keyboard_dev].fd);
+            fprintf(stderr, "kbd read error: %s\n", strerror(errno));
+            return 1;
+        }
+        if (ret != (ssize_t)sizeof(*ev))
+        {
+            return 1; //did not get full event
+        }
+
+        if (ev->type != EV_KEY || ev->value == 0)
+        {
+            continue; //skip if release or non-key event
+        }
+        else
+        {   //real key presses 
+            return 0; //got all the key event data returning data
+        }
+    }
+}
+
+int RTC_handler(struct pollfd *pfds, unsigned long *rtc_data)
+{
+    ssize_t ret;
+
+    if (pfds[rtc_dev].revents & (POLLERR | POLLHUP | POLLNVAL)) 
+    {
+        //Unplugged: stop polling this fd (negative fd is ignored)
+        close(pfds[rtc_dev].fd);
+        pfds[rtc_dev].fd = -1; //mark as invalid
+        return 2;
+        //continue;
+    }
+    if (!(pfds[rtc_dev].revents & POLLIN)) //check id fd has data to report
+    {
+        return 3; //no data skip device
+    }
+
+    ret = read(pfds[rtc_dev].fd, rtc_data, sizeof(*rtc_data)); //read all the data out into rtc_data
+    if (ret == -1)
+    {
+        if (errno != EAGAIN)
+        {
+            fprintf(stderr, "rtc read error: %s\n", strerror(errno));
+        }
+        return 4;
+    }
+    if (ret != (ssize_t)sizeof(*rtc_data))
+    {
+        return 5; //did not get full event
+    }
+    return (*rtc_data & RTC_AF) ? 0 : 1; //RTC_AF (0x20) Alarm_flag masked with data
 }
 
 void test(void)
