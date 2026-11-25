@@ -1,6 +1,6 @@
 CC = $(CROSS_COMPILE)gcc
 CFLAGS ?= -Wall -Wextra -O2 -I. -Iinclude
-LDFLAGS ?=
+LDFLAGS ?= -lcjson
 
 TARGET = user_int
 SRCS = user_interface.c
