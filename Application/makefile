@@ -3,8 +3,8 @@ CFLAGS ?= -Wall -Wextra -O2 -I. -Iinclude
 LDFLAGS ?= -lcjson
 
 TARGET = user_int
-SRCS = user_interface.c
-HDRS = user_interface.h
+SRCS = user_interface.c QR_reader/qr_reader_app.c
+HDRS = user_interface.h QR_reader/qr_reader_app.h
 OBJS = $(SRCS:.c=.o)
 
 all: $(TARGET)

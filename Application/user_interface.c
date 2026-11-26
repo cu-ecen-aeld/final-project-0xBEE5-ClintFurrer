@@ -15,6 +15,7 @@
 //#include <pthread.h>
 
 #include "user_interface.h"
+#include "QR_reader/qr_reader_app.h"
 
 void test(void);
 void gps_show(void);
@@ -27,6 +28,9 @@ int RTC_handler(struct pollfd *pfds, unsigned long *rtc_data);
 int find_next_alarm(time_t now, time_t *new_alarm, alarm_t *alarm_lst);
 int save_alarm_list(alarm_t *alarm_lst);
 int json_alarms_to_alarm_lst(alarm_t *alarm_lst);
+int QR_code_handler(struct pollfd *pfds);
+int display_time_handler(struct pollfd *pfds, int lcd_fd);
+int arm_alarm(alarm_t *alarm_lst, int rtc_fd);
 
 static int test_bit(int bit, const unsigned long *arr)
 {
@@ -94,6 +98,7 @@ int main (void)
     int cmd_idx = 0;
     char lcd_buff[48];
     int lcd_len;
+    tiny_code_reader_results_t qr_sensor;
 
     cmd_member_t testA;
     testA.name = "hello";
@@ -120,35 +125,35 @@ int main (void)
 
     static alarm_t alarms[MAX_ALARMS];   /* zero-initialized: all slots free */
 
-    json_alarms_to_alarm_lst(alarms);
+    //json_alarms_to_alarm_lst(alarms); //load from JSON file
 
-/*
+
     alarms[0].in_use_FLG = 1;
     alarms[0].kind = ALARM_ONCE;
     alarms[0].id = 1;
-    alarms[0].at = 1795312063 + 200;
-    snprintf(alarms[0].name, sizeof(alarms[0].name), "%s", "test1");
+    alarms[0].at = 1795400165 + 300;
+    snprintf(alarms[0].name, sizeof(alarms[0].name), "%s", "Pick up Kid");
 
     alarms[1].in_use_FLG = 1;
     alarms[1].kind = ALARM_ONCE;
     alarms[1].id = 2;
-    alarms[1].at = 1795312063 + 150;
-    snprintf(alarms[1].name, sizeof(alarms[1].name), "%s", "test2");
-
+    alarms[1].at = 1795400165 + 150;
+    snprintf(alarms[1].name, sizeof(alarms[1].name), "%s", "Walk the Dog");
+/*
     alarms[2].in_use_FLG = 1;
     alarms[2].kind = ALARM_WEEKLY;
     alarms[2].id = 3;
     alarms[2].day_mask = 0x07;
     alarms[2].time_of_day = 64800;
     snprintf(alarms[3].name, sizeof(alarms[3].name), "%s", "test_barf");
-*/
+
     printf("debug alarm list\n");
     printf("alarm id %d\n", alarms[0].id);
     printf("alarm name %s\n", alarms[0].name);
     printf("alarm at %ld\n", alarms[0].at);
     printf("alarm weekly mask %d\n", alarms[2].day_mask);
     printf("time of day %d\n", alarms[2].time_of_day);
-
+*/
     int lcd_fd = open("/dev/lcd", O_WRONLY);
     if (lcd_fd == -1)
     {
@@ -199,8 +204,8 @@ int main (void)
     };
 
     struct itimerspec ts_timeD = {
-    .it_value = { .tv_sec = 0, .tv_nsec = 800000000 },    // Initial expiration: 
-    .it_interval = { .tv_sec = 0, .tv_nsec = 800000000 }  // Repeat interval: 
+    .it_value = { .tv_sec = 0, .tv_nsec = 500000000 },    // Initial expiration: 
+    .it_interval = { .tv_sec = 0, .tv_nsec = 500000000 }  // Repeat interval: 
     };
 
     if (timerfd_settime(qr_fd, 0, &ts_qr, NULL) == -1) 
@@ -217,6 +222,7 @@ int main (void)
         return -1;
     }
 
+    qr_code_init(&qr_sensor);
 
     //setup the poll struct
     struct pollfd pfds[MAX_DEVS];
@@ -259,11 +265,14 @@ int main (void)
 */
 
 
-    struct tm tmv = {0};
-    time_t now = timegm(&tmv);
-    time_t next_alarm;
-    int alarm_stat = find_next_alarm(now, &next_alarm, alarms);
-    //int alarm_stat = -1;
+    //struct tm tmv = {0};
+    //time_t now = timegm(&tmv);
+    //time_t next_alarm;
+    //int alarm_stat = find_next_alarm(now, &next_alarm, alarms);
+    //printf("alarm stat %d\n", alarm_stat);
+    
+    int alarm_stat = arm_alarm(alarms, rtc_fd); //arm alarm list
+    printf("Starting main loop!\n");
     for (;;)
     {
         if (poll(pfds, num_devices, -1) < 0) //sleep until event
@@ -272,118 +281,154 @@ int main (void)
             {
                 continue; //back to top IRQ happent
             }
+            printf("poll error! %d\n", errno);
             return -1;
         }
+        struct input_event ev;
+        unsigned long rtc_data;
+        ssize_t ret_lcd;
+        
+        int timeDis_stat = display_time_handler(pfds, lcd_fd);
+        if (timeDis_stat != 0)
+        {
 
+        }
 
-            struct input_event ev;
-            unsigned long rtc_data;
-            ssize_t ret_lcd;
+        int QR_stat = QR_code_handler(pfds);
+        if (QR_stat != 0)
+        {
 
-            int rtc_stat = RTC_handler(pfds, &rtc_data);
-            if (rtc_stat == 0)
+        }
+        
+        int rtc_stat = RTC_handler(pfds, &rtc_data);
+        if (rtc_stat == 0)
+        {
+            printf("RTC alarm fired!\n");
+            printf("alarm stat %d\n", alarm_stat);
+            if (alarm_stat >= 0)
             {
-                printf("RTC alarm fired!\n");
-                printf("alarm stat %d\n", alarm_stat);
-                if (alarm_stat >= 0)
+                printf("%s\n", alarms[alarm_stat].name);
+                
+                if (alarms[alarm_stat].kind == ALARM_ONCE)
                 {
-                    printf("%s\n", alarms[alarm_stat].name);
+                    alarms[alarm_stat].in_use_FLG = 0; //disable alarm 
+                    time_t local = alarms[alarm_stat].at - 7 * 3600;
+                    struct tm t;
+                    gmtime_r(&local, &t);
+                    char line[48];
+                    int len = snprintf(line, sizeof(line), "\033[Lx0y0;\033[Lk%.10s %02d:%02d", alarms[alarm_stat].name, t.tm_hour, t.tm_min);
+                    write(lcd_fd, line, len);
                 }
-                struct rtc_time rt;
-                ioctl(rtc_fd, RTC_RD_TIME, &rt); //read current time
-                struct tm tmv = {0};
-                tmv.tm_sec = rt.tm_sec;   tmv.tm_min = rt.tm_min;   tmv.tm_hour = rt.tm_hour;
-                tmv.tm_mday = rt.tm_mday; tmv.tm_mon = rt.tm_mon;   tmv.tm_year = rt.tm_year;
-                time_t now = timegm(&tmv);
-                time_t next_alarm;
-                alarm_stat = find_next_alarm(now, &next_alarm, alarms);
-                if (alarm_stat >= 0)
+                else if (alarms[alarm_stat].kind == ALARM_DAILY || ALARM_WEEKLY)
                 {
-                    struct tm tmv;
-                    struct rtc_wkalrm wk;
-                    gmtime_r(&next_alarm, &tmv);
-                    memset(&wk, 0, sizeof(wk));
-                    wk.enabled = 1;
-                    wk.pending = 0;
-                    wk.time.tm_sec = tmv.tm_sec;
-                    wk.time.tm_min = tmv.tm_min;
-                    wk.time.tm_hour = tmv.tm_hour;
-                    wk.time.tm_mday = tmv.tm_mday;
-                    wk.time.tm_mon  = tmv.tm_mon;
-                    wk.time.tm_year = tmv.tm_year;
-
-                    printf("alarm: %04d-%02d-%02d %02d:%02d:%02d UTC (enabled=%d)\n",
-                        wk.time.tm_year + 1900,
-                        wk.time.tm_mon + 1,
-                        wk.time.tm_mday,
-                        wk.time.tm_hour,
-                        wk.time.tm_min,
-                        wk.time.tm_sec,
-                        wk.enabled);
-
-                    char buf[32];
-                    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
-                    printf("alarm: %s UTC\n", buf);  
-                    ioctl(rtc_fd, RTC_WKALM_SET, &wk); //TODO error check
-                    ioctl(rtc_fd, RTC_AIE_ON, 0);
-                    printf("new alarm found and armed! alarm idx %d\n", alarm_stat);
-                }
-                else
-                {
-                    ioctl(rtc_fd, RTC_AIE_OFF, 0);   /* nothing pending: disarm */
-                    printf("no alarms are pending...\n");
-                }
-
-
-                printf("found alarm idx is the earlist %d\n", alarm_stat);
-
-            }
-
-            while(1) //loop until all data is read out
-            {
-                int key_stat = keyboard_handler(pfds, &ev);
-                printf("key_stat %d\n", key_stat);
-                if (key_stat != 0)
-                {
-                    break;
-                }
-
-                switch(ev.code)
-                {
-                    case KEY_UP:
-                        memset(lcd_buff, 0, sizeof(char));
-                        printf("UP key pressed\n");
-                        
-                        printf("cmd_idx up:%d\n", cmd_idx);
-                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
-                        printf("%s\n", lcd_buff);
-                        ret_lcd = write(lcd_fd, lcd_buff, lcd_len);                        
-                        cmd_idx = (cmd_idx + 5 - 1) % 5;
-                        break;
-                    case KEY_DOWN:
-                        memset(lcd_buff, 0, sizeof(char));
-                        printf("key down pressed\n");
-                        printf("cmd_idx dwn:%d\n", cmd_idx);
-                        lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
-                        printf("%s\n", lcd_buff);
-                        ret_lcd = write(lcd_fd, lcd_buff, lcd_len);
-                        cmd_idx = (cmd_idx + 5 + 1) % 5;;
-                        if (ret_lcd == -1)
-                        {
-
-                        }
-                        break;
-                    case KEY_LEFT:
-                        printf("key left pressed\n");
-                        break;
-                    case KEY_ENTER:
-                        printf("enter pressed\n");
-                        cmd_idx = (cmd_idx + 5 - 1) % 5;
-                        supported_cmds[cmd_idx].handler();
-                        break;
+                    int local_tod = (alarms[alarm_stat].time_of_day - 7 * 3600 + 86400) % 86400;
+                    int hh = local_tod / 3600;
+                    int mm = (local_tod % 3600) / 60;
+                    char line[48];
+                    int len = snprintf(line, sizeof(line), "\033[Lx0y0;\033[Lk%.8s %02d:%02d", alarms[alarm_stat].name, hh, mm);
+                    write(lcd_fd, line, len);
                 }
             }
+            alarm_stat = arm_alarm(alarms, rtc_fd); //arm any new alarms
+            int save_stat = save_alarm_list(alarms); //save new alarm states
+            if (save_stat < 0)
+            {
+                printf("save alarm failed %d\n", save_stat);
+            }
+        }
+
+        int key_stat = keyboard_handler(pfds, &ev);
+        if (key_stat != 0)
+        {
+        
+        }
+        switch(ev.code)
+        {
+            case KEY_UP:
+                memset(lcd_buff, 0, sizeof(char));
+                printf("UP key pressed\n");
+                
+                printf("cmd_idx up:%d\n", cmd_idx);
+                lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
+                printf("%s\n", lcd_buff);
+                ret_lcd = write(lcd_fd, lcd_buff, lcd_len);                        
+                cmd_idx = (cmd_idx + 5 - 1) % 5;
+                break;
+            case KEY_DOWN:
+                memset(lcd_buff, 0, sizeof(char));
+                printf("key down pressed\n");
+                printf("cmd_idx dwn:%d\n", cmd_idx);
+                lcd_len = snprintf(lcd_buff, sizeof(lcd_buff) - 1, "\033[Lx0y0;\033[Lk%s", supported_cmds[cmd_idx].name);
+                printf("%s\n", lcd_buff);
+                ret_lcd = write(lcd_fd, lcd_buff, lcd_len);
+                cmd_idx = (cmd_idx + 5 + 1) % 5;;
+                if (ret_lcd == -1)
+                {
+
+                }
+                break;
+            case KEY_LEFT:
+                printf("key left pressed\n");
+                break;
+            case KEY_ENTER:
+                printf("enter pressed\n");
+                cmd_idx = (cmd_idx + 5 - 1) % 5;
+                supported_cmds[cmd_idx].handler();
+                break;
+        }
     }//for ever loop
+}
+
+int arm_alarm(alarm_t *alarm_lst, int rtc_fd)
+{
+    int alarm_stat = -1;
+    struct rtc_time rt;
+    ioctl(rtc_fd, RTC_RD_TIME, &rt); //read current time
+    struct tm tmv = {0};
+    tmv.tm_sec = rt.tm_sec;   tmv.tm_min = rt.tm_min;   tmv.tm_hour = rt.tm_hour;
+    tmv.tm_mday = rt.tm_mday; tmv.tm_mon = rt.tm_mon;   tmv.tm_year = rt.tm_year;
+    time_t now = timegm(&tmv);
+    time_t next_alarm;
+    alarm_stat = find_next_alarm(now, &next_alarm, alarm_lst);
+    if (alarm_stat >= 0)
+    {
+        struct tm tmv;
+        struct rtc_wkalrm wk;
+        gmtime_r(&next_alarm, &tmv);
+        memset(&wk, 0, sizeof(wk));
+        wk.enabled = 1;
+        wk.pending = 0;
+        wk.time.tm_sec = tmv.tm_sec;
+        wk.time.tm_min = tmv.tm_min;
+        wk.time.tm_hour = tmv.tm_hour;
+        wk.time.tm_mday = tmv.tm_mday;
+        wk.time.tm_mon  = tmv.tm_mon;
+        wk.time.tm_year = tmv.tm_year;
+
+        printf("alarm: %04d-%02d-%02d %02d:%02d:%02d UTC (enabled=%d)\n",
+            wk.time.tm_year + 1900,
+            wk.time.tm_mon + 1,
+            wk.time.tm_mday,
+            wk.time.tm_hour,
+            wk.time.tm_min,
+            wk.time.tm_sec,
+            wk.enabled);
+
+        char buf[32];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv);
+        printf("alarm: %s UTC\n", buf);  
+        ioctl(rtc_fd, RTC_WKALM_SET, &wk); //TODO error check
+        ioctl(rtc_fd, RTC_AIE_ON, 0);
+        printf("new alarm found and armed! alarm idx %d\n", alarm_stat);
+    }
+    else
+    {
+        ioctl(rtc_fd, RTC_AIE_OFF, 0);   /* nothing pending: disarm */
+        printf("no alarms are pending...\n");
+    }
+    printf("found alarm idx is the earlist %d\n", alarm_stat);
+
+    return alarm_stat;
 }
 
 static void alarm_type_lookup(alarm_kind_t kind, char *data)
@@ -832,7 +877,7 @@ int QR_code_handler(struct pollfd *pfds)
     }
 
     uint64_t timerData;
-    ret = read(pfds[qr_timer].fd, timerData, sizeof(timerData)); //read all the data out into rtc_data
+    ret = read(pfds[qr_timer].fd, &timerData, sizeof(timerData)); //read all the data out into rtc_data
     if (ret == -1)
     {
         if (errno != EAGAIN)
@@ -842,9 +887,63 @@ int QR_code_handler(struct pollfd *pfds)
         return 4;
     }   
 
+    if (ret == sizeof(timerData))
+    {
+        //printf("will read and handle QR code reads here...\n");
+    }
+
     return 0;
 }
 
+int display_time_handler(struct pollfd *pfds, int lcd_fd)
+{
+    ssize_t ret;
+
+    if (pfds[timeD_timer].revents & (POLLERR | POLLHUP | POLLNVAL)) 
+    {
+        //Unplugged: stop polling this fd (negative fd is ignored)
+        close(pfds[timeD_timer].fd);
+        pfds[timeD_timer].fd = -1; //mark as invalid
+        return 2;
+    }
+    if (!(pfds[timeD_timer].revents & POLLIN)) //check id fd has data to report
+    {
+        return 3; //no data skip device
+    }
+
+    uint64_t timerData;
+    ret = read(pfds[timeD_timer].fd, &timerData, sizeof(timerData)); //read all the data out into rtc_data
+    if (ret == -1)
+    {
+        if (errno != EAGAIN)
+        {
+            fprintf(stderr, "QR timer read error: %s\n", strerror(errno)); //TODO don't like this
+        }
+        return 4;
+    }   
+
+    if (ret == sizeof(timerData))
+    {
+        time_t now = time(NULL); 
+        time_t local = now - 7 * 3600; //gives AZ time UTC-7 with no DST
+        struct tm tmv;
+        gmtime_r(&local, &tmv);           /* gmtime_r on the shifted value gives MST fields */
+
+        char line[48];
+        int len = snprintf(line, sizeof(line), "\033[Lx0y1;\033[Lk%02d:%02d:%02d MST",
+                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        if (len > 0)
+        {
+            int ret_lcd = write(lcd_fd, line, len);
+            if (ret_lcd == -1)
+            {
+                return -1;
+            }
+        }
+    }
+
+    return 0;
+}
 
 /**
  * 
